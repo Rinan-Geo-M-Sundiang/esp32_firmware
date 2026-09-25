@@ -295,11 +295,25 @@ void checkRemoteOverrideIfNeeded() {
 void updateIrrigation() {
   // A cap-cleared override (evaluateZone() forcing manualOverride=false
   // when the water cap hits) must stick. Only pull in a FRESH remote
-  // command here if the remote flag actually changed since we last saw
-  // it — otherwise this line would blindly resurrect the override we
-  // just cleared, re-triggering the blip every loop.
-  static bool lastSeenRemoteLowland  = remoteOverrideLowland;
-  static bool lastSeenRemoteHighland = remoteOverrideHighland;
+  // command if the remote flag actually changed since we last saw it —
+  // otherwise this line would blindly resurrect the override we just
+  // cleared, re-triggering the blip every loop.
+  //
+  // NOTE: the "last seen" baseline must NOT default to whatever
+  // remoteOverride* happens to hold on first call — if a command arrives
+  // before updateIrrigation() runs even once, that would be silently
+  // treated as "no change" and override would never activate. Use a
+  // separate "have we run yet" flag instead of trusting the initial
+  // value of the mirrored bool.
+  static bool firstRun              = true;
+  static bool lastSeenRemoteLowland;
+  static bool lastSeenRemoteHighland;
+
+  if (firstRun) {
+    lastSeenRemoteLowland  = !remoteOverrideLowland;  // force a mismatch
+    lastSeenRemoteHighland = !remoteOverrideHighland; // so tick 0 always syncs
+    firstRun = false;
+  }
 
   if (remoteOverrideLowland != lastSeenRemoteLowland) {
     lowlandState.manualOverride = remoteOverrideLowland;
