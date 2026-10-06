@@ -8,12 +8,12 @@
 #include "offline_buffer.h"
 
 // ─── WiFi ───────────────────────────────────────────────────────────────────
-#define WIFI_SSID    "HUAWEI-2.4G-7Sj5"
-#define WIFI_PASS    "n2Abeu7Q"
+#define WIFI_SSID    ""
+#define WIFI_PASS    ""
 
 // ─── Firebase RTDB ──────────────────────────────────────────────────────────
-#define FIREBASE_DB_URL "https://esp32testing-477e7-default-rtdb.asia-southeast1.firebasedatabase.app"
-#define FIREBASE_SECRET "43yYixk5sz0ssIFjCFzVsvHaMdaKPyBX6UIko1ye"
+#define FIREBASE_DB_URL ""
+#define FIREBASE_SECRET ""
 
 // ─── NTP ────────────────────────────────────────────────────────────────────
 #define NTP_SERVER     "pool.ntp.org"
