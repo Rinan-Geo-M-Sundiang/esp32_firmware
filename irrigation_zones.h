@@ -83,7 +83,7 @@ void evaluateZone(ZoneState& state, const ZoneReading& reading,
     // cap) silently re-opened the solenoid one loop tick later, before
     // the cooldown had any chance to matter. Mirrors the explicit reset
     // already used in the emergency-cooldown branch above.
-    if (vpdKpa >= VPD_START_GATE && now >= normalCooldownUntilMs) {
+    if (vpdKpa >= t.vpdGate && now >= normalCooldownUntilMs) {
       latchedCause     = NORMAL;
       state.autoActive = true;
     } else {

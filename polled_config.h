@@ -6,15 +6,19 @@
 // interval/lastKnownTs/bootLoaded variables. Adding a fourth polled value
 // meant copy-pasting a fourth function; now it's one line.
 #pragma once
+#include <functional>
 #include "rtdb_client.h"
 
 template <typename T>
 class PolledConfig {
 public:
-  // fetchFn: pure "given a client, return the current remote value" fetcher
-  // (e.g. fetchRemoteThresholds, fetchFertSchedule).
+  // fetchFn: pure "given a client, return the current remote value" fetcher.
+  // std::function instead of a raw function pointer so a lambda can be
+  // passed directly (e.g. capturing which RTDB path/defaults to use) —
+  // no need to hand-write a differently-named wrapper function per value
+  // just to match a fixed function-pointer signature.
   PolledConfig(RtdbClient& client, const char* updatedPath,
-               unsigned long intervalMs, T (*fetchFn)(RtdbClient&), T initial)
+               unsigned long intervalMs, std::function<T(RtdbClient&)> fetchFn, T initial)
     : _client(client), _updatedPath(updatedPath), _intervalMs(intervalMs),
       _fetchFn(fetchFn), _value(initial) {}
 
@@ -51,7 +55,7 @@ private:
   RtdbClient&   _client;
   const char*   _updatedPath;
   unsigned long _intervalMs;
-  T (*_fetchFn)(RtdbClient&);
+  std::function<T(RtdbClient&)> _fetchFn;
   T _value;
   unsigned long _lastCheck   = 0;
   unsigned long _lastKnownTs = 0;

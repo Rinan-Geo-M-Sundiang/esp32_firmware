@@ -4,11 +4,14 @@
 // dependency, so they compile in a native unit test build).
 #pragma once
 #include <time.h>
+#include "json_field.h"  // JsonField::asFloat is used by the pure
+                          // parseZoneThresholds() below, which is outside
+                          // the #ifdef ARDUINO guard — must not depend on
+                          // some other file including json_field.h first.
 
 #ifdef ARDUINO
   #include <Arduino.h>
   #include "rtdb_client.h"
-  #include "json_field.h"
 #endif
 
 // ─── Thresholds (legacy single-zone model — superseded by the dual-zone
@@ -151,3 +154,8 @@ inline bool decideFertPump(const FertSchedule& s, time_t now,
 inline bool decideFertilizer(const FertSchedule& s, time_t now) {
   return isFertScheduleActiveNow(s, now);
 }
+
+// Dual-zone threshold parsing (parseZoneThresholds / fetchZoneThresholds)
+// moved to irrigation_types.h — it needs the ZoneThresholds type, which
+// isn't defined yet at this point in main.ino's include order. See the
+// note at the bottom of irrigation_types.h.
