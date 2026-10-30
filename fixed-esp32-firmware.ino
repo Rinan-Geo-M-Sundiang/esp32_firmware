@@ -26,6 +26,7 @@
 #include "water_budget.h"
 #include "vpd.h"
 #include "irrigation_zones.h"
+#include "misting.h"
 
 // ─── Pin definitions ────────────────────────────────────────────────────────
 #define DHT_PIN_1   16   // lowland sensor A (tomato/eggplant compartment)
@@ -46,6 +47,11 @@
 // selection anymore (previously leachate vs. organic on separate pumps).
 #define RELAY_PIN_FERT     33
 #define SOLENOID_PIN_FERT  33
+
+// Misting pump — single load (pump + solenoid on one relay), like fertilizer.
+// ⚠️ PROVISIONAL pin: the misting relay is not assigned in the pin plan yet.
+// Change this to the real GPIO before wiring.
+#define RELAY_PIN_MIST     27
 
 // ─── Soil calibration ───────────────────────────────────────────────────────
 #define SOIL_DRY 5460  // Raw ADC in dry air  -> 0 % moisture
@@ -68,9 +74,34 @@ RtdbClient rtdb(FIREBASE_DB_URL, FIREBASE_SECRET);
 // ─── Fertilizer pump (single pump — one relay, one solenoid) ───────────────
 Pump pumpFertilizer("PUMP2(fertilizer)", RELAY_PIN_FERT, SOLENOID_PIN_FERT);
 
+// ─── Misting pump + controller (highland; config/misting) ──────────────────
+Pump pumpMist("PUMP3(misting)", RELAY_PIN_MIST, RELAY_PIN_MIST);
+MistingController mistingCtrl;
+PolledConfig<MistConfig> mistCfg(rtdb, "config/misting_updated",
+    CONFIG_POLL_INTERVAL,
+    [](RtdbClient& c) { return fetchMistConfig(c, "config/misting", MIST_DEFAULTS); },
+    MIST_DEFAULTS);
+
+// ⚠️ PLACEHOLDER — no level sensor code yet. Set from the water reservoir
+// check (isReservoirSafe) when the JSN-SR04T code exists.
+bool waterReservoirSafe = true;
+
 PolledConfig<FertSchedule> fertScheduleCfg(rtdb, "config/fert_schedule_updated",
                                           CONFIG_POLL_INTERVAL, fetchFertSchedule,
                                           FertSchedule{6,0,6,15,{false,true,false,true,false,true,false}});
+
+// ─── Dual-zone irrigation thresholds, polled from RTDB (config/thresholds,
+// config/thresholds_highland). Each lambda already knows its own RTDB path
+// and default struct, so no separate fetchLowlandThresholds()/
+// fetchHighlandThresholds() wrapper functions are needed. ──────────────────
+PolledConfig<ZoneThresholds> lowlandThreshCfg(rtdb, "config/thresholds_updated",
+    CONFIG_POLL_INTERVAL,
+    [](RtdbClient& c) { return fetchZoneThresholds(c, "config/thresholds", lowlandThresh); },
+    lowlandThresh);
+PolledConfig<ZoneThresholds> highlandThreshCfg(rtdb, "config/thresholds_highland_updated",
+    CONFIG_POLL_INTERVAL,
+    [](RtdbClient& c) { return fetchZoneThresholds(c, "config/thresholds_highland", highlandThresh); },
+    highlandThresh);
 
 // ─── Irrigation zone state (dual-zone, finalized logic) ────────────────────
 ZoneState lowlandState;
@@ -170,6 +201,9 @@ void readSensors() {
 //   OVR L <0|1>                -> force lowland manual override
 //   OVR H <0|1>                -> force highland manual override
 //   OVR F <0|1>                -> force fertilizer pump manual override
+//   OVR M <0|1>                -> force misting pump manual override
+//   WATER <0|1>                -> water reservoir safe (1) or low (0)
+//   MIST <tempOn> <humidityOn> -> set misting thresholds (same as config/misting)
 //   RESET L                    -> clears lowland mechanical lock/cap history
 //   RESET H                    -> clears highland mechanical lock/cap history
 void applySimReading(int idx, float t, float h, int soilRaw) {
@@ -233,9 +267,19 @@ void handleSimSerial() {
     } else if (tok[1] == "F") {
       pumpFertilizer.overrideActive = val;
       Serial.printf("SIM: fertilizer override = %s\n", val ? "TRUE" : "FALSE");
+    } else if (tok[1] == "M") {
+      pumpMist.overrideActive = val;
+      Serial.printf("SIM: misting override = %s\n", val ? "TRUE" : "FALSE");
     } else {
-      Serial.println("SIM: OVR target must be L, H or F");
+      Serial.println("SIM: OVR target must be L, H, F or M");
     }
+  } else if (tok[0] == "MIST" && nTok >= 3) {
+    mistingCtrl.setConfig(MistConfig{ tok[1].toFloat(), tok[2].toFloat() });
+    Serial.printf("SIM: misting tempOn=%.1f humidityOn=%.1f\n",
+                  mistingCtrl.config().tempOn, mistingCtrl.config().humidityOn);
+  } else if (tok[0] == "WATER" && nTok >= 2) {
+    waterReservoirSafe = tok[1].toInt() != 0;
+    Serial.printf("SIM: water reservoir = %s\n", waterReservoirSafe ? "SAFE" : "LOW");
   } else if (tok[0] == "RESET" && nTok >= 2) {
     tok[1].toUpperCase();
     if (tok[1] == "L") {
@@ -248,7 +292,7 @@ void handleSimSerial() {
       Serial.println("SIM: highland cap history / mechanical lock cleared");
     }
   } else {
-    Serial.println("SIM: unrecognized command. Use: L/H <temp> <hum> <soilRaw> | FAIL <1-3> | OVR L/H/F <0|1> | RESET L/H");
+    Serial.println("SIM: unrecognized command. Use: L/H <temp> <hum> <soilRaw> | FAIL <1-3> | OVR L/H/F/M <0|1> | WATER <0|1> | MIST <tempOn> <humidityOn> | RESET L/H");
   }
 }
 #endif
@@ -288,6 +332,7 @@ void checkRemoteOverrideIfNeeded() {
   remoteOverrideHighland = rtdb.getBool("control/relay_highland");
 
   pumpFertilizer.overrideActive = rtdb.getBool("control/relay_fert");
+  pumpMist.overrideActive       = rtdb.getBool("control/relay_mist");
 #endif
 }
 
@@ -327,10 +372,10 @@ void updateIrrigation() {
   float lowlandVpd  = computeVPD(lowlandReading.temperature,  lowlandReading.humidity);
   float highlandVpd = computeVPD(highlandReading.temperature, highlandReading.humidity);
 
-  evaluateZone(lowlandState,  lowlandReading,  lowlandThresh,  lowlandVpd,
+  evaluateZone(lowlandState,  lowlandReading,  lowlandThreshCfg.value(),  lowlandVpd,
                lowlandCause,  lowlandBudget,  WATER_LIMIT_LOWLAND,
                lowlandCapHistory,  lowlandNormalCooldownUntilMs);
-  evaluateZone(highlandState, highlandReading, highlandThresh, highlandVpd,
+  evaluateZone(highlandState, highlandReading, highlandThreshCfg.value(), highlandVpd,
                highlandCause, highlandBudget, WATER_LIMIT_HIGHLAND,
                highlandCapHistory, highlandNormalCooldownUntilMs);
 
@@ -375,6 +420,7 @@ void setup() {
   digitalWrite(SOLENOID_PIN_HIGHLAND, HIGH);
 
   pumpFertilizer.begin();
+  pumpMist.begin();
 
   dht1.begin(); dht2.begin(); dht3.begin();
 
@@ -401,6 +447,10 @@ void setup() {
     waitForNTP(10000UL);
 
     fertScheduleCfg.forceFetch();
+    lowlandThreshCfg.forceFetch();
+    highlandThreshCfg.forceFetch();
+    mistCfg.forceFetch();
+    mistingCtrl.setConfig(mistCfg.value());
 
     Serial.printf("BOOT FERT SCHEDULE  %02d:%02d-%02d:%02d\n",
                   fertScheduleCfg.value().startHour, fertScheduleCfg.value().startMinute,
@@ -427,6 +477,9 @@ void loop() {
 
   // 1. Refresh polled fertilizer schedule (every 15s, only refetches when changed).
   fertScheduleCfg.poll();
+  lowlandThreshCfg.poll();
+  highlandThreshCfg.poll();
+  if (mistCfg.poll()) mistingCtrl.setConfig(mistCfg.value());
 
   // 2. Read sensors on interval (every 5s).
   if (millis() - lastSensorRead >= SENSOR_INTERVAL) {
@@ -453,6 +506,9 @@ void loop() {
   bool fertAuto = decideFertilizer(fertScheduleCfg.value(), now) && !fertLocked;
   if (fertLocked) pumpFertilizer.overrideActive = false;
   pumpFertilizer.update(fertAuto);
+
+  // 5b. Drive the misting pump every loop (highland sensor, water-safe lock).
+  mistingCtrl.update(pumpMist, highlandReading, waterReservoirSafe);
 
   // 6. Push to Firebase (every 10s).
   if (millis() - lastUpload >= UPLOAD_INTERVAL) {
